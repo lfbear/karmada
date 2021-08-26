@@ -1046,6 +1046,8 @@ func (d *ResourceDetector) ReconcileResourceBinding(key util.QueueKey) error {
 	switch binding.Spec.Resource.Kind {
 	case util.DeploymentKind:
 		return d.AggregateDeploymentStatus(binding.Spec.Resource, binding.Status.AggregatedStatus)
+	case util.DaemonSetKind:
+		return d.AggregateDaemonSetStatus(binding.Spec.Resource, binding.Status.AggregatedStatus)
 	case util.ServiceKind:
 		return d.AggregateServiceStatus(binding.Spec.Resource, binding.Status.AggregatedStatus)
 	case util.IngressKind:

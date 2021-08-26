@@ -83,6 +83,71 @@ func (d *ResourceDetector) AggregateDeploymentStatus(objRef workv1alpha1.ObjectR
 	return nil
 }
 
+// AggregateDeploymentStatus summarize deployment status and update to original objects.
+func (d *ResourceDetector) AggregateDaemonSetStatus(objRef workv1alpha1.ObjectReference, status []workv1alpha1.AggregatedStatusItem) error {
+	if objRef.APIVersion != "apps/v1" {
+		return nil
+	}
+
+	obj := &appsv1.DaemonSet{}
+	if err := d.Client.Get(context.TODO(), client.ObjectKey{Namespace: objRef.Namespace, Name: objRef.Name}, obj); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		klog.Errorf("Failed to get DaemonSet(%s/%s): %v", objRef.Namespace, objRef.Name, err)
+		return err
+	}
+
+	oldStatus := &obj.Status
+	newStatus := &appsv1.DaemonSetStatus{}
+	for _, item := range status {
+		if item.Status == nil {
+			continue
+		}
+		temp := &appsv1.DaemonSetStatus{}
+		if err := json.Unmarshal(item.Status.Raw, temp); err != nil {
+			klog.Errorf("Failed to unmarshal status")
+			return err
+		}
+		klog.V(3).Infof("Grab DaemonSet(%s/%s) status from cluster(%s), current: %d, ready: %d, updated: %d, available: %d, unavailable: %d",
+			obj.Namespace, obj.Name, item.ClusterName, temp.CurrentNumberScheduled, temp.NumberReady, temp.UpdatedNumberScheduled, temp.NumberAvailable, temp.NumberUnavailable)
+		newStatus.ObservedGeneration = obj.Generation
+		newStatus.CurrentNumberScheduled += temp.CurrentNumberScheduled
+		newStatus.NumberMisscheduled += temp.NumberMisscheduled
+		newStatus.DesiredNumberScheduled += temp.DesiredNumberScheduled
+		newStatus.NumberReady += temp.NumberReady
+		newStatus.UpdatedNumberScheduled += temp.UpdatedNumberScheduled
+		newStatus.NumberAvailable += temp.NumberAvailable
+		newStatus.NumberUnavailable += temp.NumberUnavailable
+	}
+
+	if oldStatus.ObservedGeneration == newStatus.ObservedGeneration &&
+		oldStatus.CurrentNumberScheduled == newStatus.CurrentNumberScheduled &&
+		oldStatus.NumberReady == newStatus.NumberReady &&
+		oldStatus.UpdatedNumberScheduled == newStatus.UpdatedNumberScheduled &&
+		oldStatus.NumberAvailable == newStatus.NumberAvailable &&
+		oldStatus.NumberUnavailable == newStatus.NumberUnavailable {
+		klog.V(3).Infof("ignore DaemonSet deployment(%s/%s) status as up to date", obj.Namespace, obj.Name)
+		return nil
+	}
+
+	oldStatus.ObservedGeneration = newStatus.ObservedGeneration
+	oldStatus.CurrentNumberScheduled = newStatus.CurrentNumberScheduled
+	oldStatus.NumberMisscheduled = newStatus.NumberMisscheduled
+	oldStatus.DesiredNumberScheduled = newStatus.DesiredNumberScheduled
+	oldStatus.NumberReady = newStatus.NumberReady
+	oldStatus.UpdatedNumberScheduled = newStatus.UpdatedNumberScheduled
+	oldStatus.NumberAvailable = newStatus.NumberAvailable
+	oldStatus.NumberUnavailable = newStatus.NumberUnavailable
+
+	if err := d.Client.Status().Update(context.TODO(), obj); err != nil {
+		klog.Errorf("Failed to update deployment(%s/%s) status: %v", objRef.Namespace, objRef.Name, err)
+		return err
+	}
+
+	return nil
+}
+
 // AggregateServiceStatus summarize service status and update to original objects.
 func (d *ResourceDetector) AggregateServiceStatus(objRef workv1alpha1.ObjectReference, status []workv1alpha1.AggregatedStatusItem) error {
 	if objRef.APIVersion != "v1" {
