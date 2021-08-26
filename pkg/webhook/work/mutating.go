@@ -117,6 +117,16 @@ func removeIrrelevantField(workload *unstructured.Unstructured) error {
 		if exist && clusterIP != corev1.ClusterIPNone {
 			unstructured.RemoveNestedField(workload.Object, "spec", "clusterIP")
 		}
+		// In the case spec.type is not NodePort, the nodePort in ports will be automatic generated, then remove them
+		serviceType, exist, _ := unstructured.NestedString(workload.Object, "spec", "type")
+		if exist && serviceType != string(corev1.ServiceTypeNodePort) {
+			ports, exist, _ := unstructured.NestedSlice(workload.Object, "spec", "ports")
+			if exist && len(ports) > 0 {
+				for _, port := range ports {
+					unstructured.RemoveNestedField(port.(map[string]interface{}), "nodePort")
+				}
+			}
+		}
 	}
 
 	if workload.GetKind() == util.JobKind {
