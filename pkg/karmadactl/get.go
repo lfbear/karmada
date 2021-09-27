@@ -29,14 +29,16 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/kubectl/pkg/cmd/get"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
-	"k8s.io/kubectl/pkg/scheme"
-	"k8s.io/kubectl/pkg/util/i18n"
+
+	//"k8s.io/kubectl/pkg/scheme"
 
 	"github.com/karmada-io/karmada/pkg/karmadactl/options"
+	"github.com/karmada-io/karmada/pkg/util/gclient"
 )
 
 const (
-	rbLabelNSKey = "propagationpolicy.karmada.io/namespace"
+	rbLabelNSKey   = "propagationpolicy.karmada.io/namespace"
+	clusterModeKey = "Push"
 )
 
 var (
@@ -49,6 +51,9 @@ var (
 		{Name: "ADOPTION", Type: "string", Format: "", Priority: 0},
 		//{Name: "LAST-UPDATE", Type: "string", Format: "", Priority: 0},
 	}
+
+	noPushModeMessage = "The karmadactl get command now only supports Push mode, [ %s ] are not push mode\n"
+	getShort          = `Display one or many resources`
 
 	karmadaConfigPath = filepath.Join(os.Getenv("HOME"), ".kube/karmada.config")
 	// ErrEmptyKarmadaConfig is the error message to be displayed if the configuration info is missing or incomplete
@@ -67,7 +72,7 @@ func NewCmdGet(out io.Writer, karmadaConfig KarmadaConfig) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:                   "get [NAME | -l label | -n namespace]  [flags]",
 		DisableFlagsInUseLine: true,
-		Short:                 i18n.T("Display one or many resources"),
+		Short:                 getShort,
 		Run: func(cmd *cobra.Command, args []string) {
 			cmdutil.CheckErr(o.Complete(cmd, args))
 			cmdutil.CheckErr(o.Validate(cmd))
@@ -135,6 +140,7 @@ func NewCommandGetOptions(parent string, streams genericclioptions.IOStreams) *C
 
 // Complete takes the command arguments and infers any remaining options.
 func (g *CommandGetOptions) Complete(cmd *cobra.Command, args []string) error {
+	newScheme := gclient.NewSchema()
 	// human readable printers have special conversion rules, so we determine if we're using one.
 	g.IsHumanReadablePrinter = true
 
@@ -163,7 +169,7 @@ func (g *CommandGetOptions) Complete(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return nil, err
 		}
-		printer, err = printers.NewTypeSetter(scheme.Scheme).WrapToPrinter(printer, nil)
+		printer, err = printers.NewTypeSetter(newScheme).WrapToPrinter(printer, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -214,8 +220,15 @@ func (g *CommandGetOptions) Run(karmadaConfig KarmadaConfig, cmd *cobra.Command,
 		return err
 	}
 
+	var noPushModeCluster []string
 	wg.Add(len(g.Clusters))
 	for idx := range g.Clusters {
+		if clusterInfos[g.Clusters[idx]].ClusterMode != clusterModeKey {
+			noPushModeCluster = append(noPushModeCluster, g.Clusters[idx])
+			wg.Done()
+			continue
+		}
+
 		if err := g.getSecretTokenInKarmada(karmadaclient, g.Clusters[idx], clusterInfos); err != nil {
 			return errors.Wrap(err, "Method getSecretTokenInKarmada get Secret info in karmada failed, err is")
 		}
@@ -223,6 +236,10 @@ func (g *CommandGetOptions) Run(karmadaConfig KarmadaConfig, cmd *cobra.Command,
 		go g.getObjInfo(&wg, &mux, f, g.Clusters[idx], &objs, &allErrs, args)
 	}
 	wg.Wait()
+	if len(noPushModeCluster) != 0 {
+		fmt.Println(fmt.Sprintf(noPushModeMessage, strings.Join(noPushModeCluster, ",")))
+	}
+
 	table := &metav1.Table{}
 	allTableRows, mapping, err := g.reconstructionRow(objs, table)
 	if err != nil {
@@ -231,11 +248,7 @@ func (g *CommandGetOptions) Run(karmadaConfig KarmadaConfig, cmd *cobra.Command,
 	table.Rows = allTableRows
 
 	setNoAdoption(mapping)
-	var tempColumnDefinition []metav1.TableColumnDefinition
-	if len(table.ColumnDefinitions) > 0 {
-		tempColumnDefinition = append(append(append(tempColumnDefinition, table.ColumnDefinitions[0], podColumns[0]), table.ColumnDefinitions[1:]...), podColumns[1:]...)
-		table.ColumnDefinitions = tempColumnDefinition
-	}
+	setColumnDefinition(table)
 
 	if len(table.Rows) == 0 {
 		return fmt.Errorf("from server (NotFound)")
@@ -340,7 +353,7 @@ func (g *CommandGetOptions) reconstructionRow(objs []Obj, table *metav1.Table) (
 		}
 		for rowIdx := range table.Rows {
 			var tempRow metav1.TableRow
-			rbKey := getRbKey(mapping.Resource, table.Rows[rowIdx], objs[ix].Cluster)
+			rbKey := getRBKey(mapping.Resource, table.Rows[rowIdx], objs[ix].Cluster)
 			tempRow.Cells = append(append(tempRow.Cells, table.Rows[rowIdx].Cells[0], objs[ix].Cluster), table.Rows[rowIdx].Cells[1:]...)
 			if _, ok := RBInfo[rbKey]; ok {
 				tempRow.Cells = append(tempRow.Cells, "Y")
@@ -387,11 +400,12 @@ func shouldGetNewPrinterForMapping(printer printers.ResourcePrinter, lastMapping
 	return printer == nil || lastMapping == nil || mapping == nil || mapping.Resource != lastMapping.Resource
 }
 
-// ClusterInfo Information about the merber in the karmada cluster.
+// ClusterInfo Information about the member in the karmada cluster.
 type ClusterInfo struct {
 	APIEndpoint string
 	BearerToken string
 	CAData      string
+	ClusterMode string
 }
 
 func (g *CommandGetOptions) clusterInfoInit(karmadaConfig KarmadaConfig, clusterInfos map[string]*ClusterInfo) (*rest.Config, error) {
@@ -404,7 +418,7 @@ func (g *CommandGetOptions) clusterInfoInit(karmadaConfig KarmadaConfig, cluster
 		return nil, errors.Wrap(err, "Method getClusterInKarmada get cluster info in karmada failed, err is")
 	}
 
-	if err := g.getRbInKarmada(karmadaclient); err != nil {
+	if err := g.getRBInKarmada(karmadaclient); err != nil {
 		return nil, err
 	}
 
@@ -442,7 +456,7 @@ func (g *CommandGetOptions) transformRequests(req *rest.Request) {
 	}, ","))
 }
 
-func (g *CommandGetOptions) getRbInKarmada(config *rest.Config) error {
+func (g *CommandGetOptions) getRBInKarmada(config *rest.Config) error {
 	objectGVR := schema.GroupVersionResource{
 		Group:    "work.karmada.io",
 		Version:  "v1alpha1",
@@ -512,6 +526,7 @@ func (g *CommandGetOptions) getClusterInKarmada(client *rest.Config, clusterInfo
 	for i := range clusterList.Items {
 		cluster := &ClusterInfo{
 			APIEndpoint: getAPIEndpoint(clusterList.Items[i]),
+			ClusterMode: getClusterMode(clusterList.Items[i]),
 		}
 		clusterInfos[clusterList.Items[i].GetName()] = cluster
 	}
@@ -527,7 +542,16 @@ func getAPIEndpoint(u unstructured.Unstructured) string {
 	return val
 }
 
-func getRbKey(groupResource schema.GroupVersionResource, row metav1.TableRow, cluster string) string {
+// getClusterMode get ClusterMode in karmada cluster return data
+func getClusterMode(u unstructured.Unstructured) string {
+	val, found, err := unstructured.NestedString(u.Object, "spec", "syncMode")
+	if !found || err != nil {
+		return ""
+	}
+	return val
+}
+
+func getRBKey(groupResource schema.GroupVersionResource, row metav1.TableRow, cluster string) string {
 	rbKey, _ := row.Cells[0].(string)
 	var suffix string
 	switch groupResource.Resource {
@@ -547,6 +571,15 @@ func getRbKey(groupResource schema.GroupVersionResource, row metav1.TableRow, cl
 func setNoAdoption(mapping *meta.RESTMapping) {
 	if mapping != nil && mapping.Resource.Resource == "pods" {
 		podColumns[1].Priority = 1
+	}
+}
+
+// setColumnDefinition set print ColumnDefinition
+func setColumnDefinition(table *metav1.Table) {
+	var tempColumnDefinition []metav1.TableColumnDefinition
+	if len(table.ColumnDefinitions) > 0 {
+		tempColumnDefinition = append(append(append(tempColumnDefinition, table.ColumnDefinitions[0], podColumns[0]), table.ColumnDefinitions[1:]...), podColumns[1:]...)
+		table.ColumnDefinitions = tempColumnDefinition
 	}
 }
 
