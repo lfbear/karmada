@@ -3,7 +3,6 @@ package detector
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -117,7 +116,7 @@ func (d *ResourceDetector) Start(ctx context.Context) error {
 		Version:  workv1alpha1.GroupVersion.Version,
 		Resource: "resourcebindings",
 	}
-	bindingHandler := informermanager.NewHandlerOnEvents(d.OnResourceBindingAdd, d.OnResourceBindingUpdate, d.OnResourceBindingDelete)
+	bindingHandler := informermanager.NewHandlerOnEvents(d.OnResourceBindingAdd, d.OnResourceBindingUpdate, nil)
 	d.InformerManager.ForResource(resourceBindingGVR, bindingHandler)
 	d.resourceBindingLister = d.InformerManager.Lister(resourceBindingGVR)
 
@@ -127,7 +126,7 @@ func (d *ResourceDetector) Start(ctx context.Context) error {
 		Version:  workv1alpha1.GroupVersion.Version,
 		Resource: "clusterresourcebindings",
 	}
-	clusterBindingHandler := informermanager.NewHandlerOnEvents(d.OnClusterResourceBindingAdd, d.OnClusterResourceBindingUpdate, d.OnClusterResourceBindingDelete)
+	clusterBindingHandler := informermanager.NewHandlerOnEvents(d.OnClusterResourceBindingAdd, d.OnClusterResourceBindingUpdate, nil)
 	d.InformerManager.ForResource(clusterResourceBindingGVR, clusterBindingHandler)
 
 	d.EventHandler = informermanager.NewFilteringHandlerOnAllEvents(d.EventFilter, d.OnAdd, d.OnUpdate, d.OnDelete)
@@ -334,18 +333,28 @@ func (d *ResourceDetector) LookForMatchedPolicy(object *unstructured.Unstructure
 	}
 
 	klog.V(2).Infof("attempts to match policy for resource(%s)", objectKey)
-	policyList := &policyv1alpha1.PropagationPolicyList{}
-	if err := d.Client.List(context.TODO(), policyList, &client.ListOptions{Namespace: objectKey.Namespace}); err != nil {
+	policyObjects, err := d.propagationPolicyLister.ByNamespace(objectKey.Namespace).List(labels.Everything())
+	if err != nil {
 		klog.Errorf("Failed to list propagation policy: %v", err)
 		return nil, err
 	}
-
-	if len(policyList.Items) == 0 {
+	if len(policyObjects) == 0 {
+		klog.V(2).Infof("no propagationpolicy find in namespace(%s).", objectKey.Namespace)
 		return nil, nil
 	}
 
-	matchedPolicies := make([]policyv1alpha1.PropagationPolicy, 0)
-	for _, policy := range policyList.Items {
+	policyList := make([]*policyv1alpha1.PropagationPolicy, 0)
+	for index := range policyObjects {
+		policy, err := helper.ConvertToPropagationPolicy(policyObjects[index].(*unstructured.Unstructured))
+		if err != nil {
+			klog.Errorf("Failed to convert PropagationPolicy from unstructured object: %v", err)
+			return nil, err
+		}
+		policyList = append(policyList, policy)
+	}
+
+	matchedPolicies := make([]*policyv1alpha1.PropagationPolicy, 0)
+	for _, policy := range policyList {
 		if util.ResourceMatchSelectors(object, policy.Spec.ResourceSelectors...) {
 			matchedPolicies = append(matchedPolicies, policy)
 		}
@@ -356,27 +365,38 @@ func (d *ResourceDetector) LookForMatchedPolicy(object *unstructured.Unstructure
 	})
 
 	if len(matchedPolicies) == 0 {
+		klog.V(2).Infof("no propagationpolicy match for resource(%s)", objectKey)
 		return nil, nil
 	}
 	klog.V(2).Infof("Matched policy(%s/%s) for resource(%s)", matchedPolicies[0].Namespace, matchedPolicies[0].Name, objectKey)
-	return &matchedPolicies[0], nil
+	return matchedPolicies[0], nil
 }
 
 // LookForMatchedClusterPolicy tries to find a ClusterPropagationPolicy for object referenced by object key.
 func (d *ResourceDetector) LookForMatchedClusterPolicy(object *unstructured.Unstructured, objectKey keys.ClusterWideKey) (*policyv1alpha1.ClusterPropagationPolicy, error) {
 	klog.V(2).Infof("attempts to match cluster policy for resource(%s)", objectKey)
-	policyList := &policyv1alpha1.ClusterPropagationPolicyList{}
-	if err := d.Client.List(context.TODO(), policyList); err != nil {
+	policyObjects, err := d.clusterPropagationPolicyLister.List(labels.Everything())
+	if err != nil {
 		klog.Errorf("Failed to list cluster propagation policy: %v", err)
 		return nil, err
 	}
-
-	if len(policyList.Items) == 0 {
+	if len(policyObjects) == 0 {
+		klog.V(2).Infof("no propagationpolicy find.")
 		return nil, nil
 	}
 
-	matchedClusterPolicies := make([]policyv1alpha1.ClusterPropagationPolicy, 0)
-	for _, policy := range policyList.Items {
+	policyList := make([]*policyv1alpha1.ClusterPropagationPolicy, 0)
+	for index := range policyObjects {
+		policy, err := helper.ConvertToClusterPropagationPolicy(policyObjects[index].(*unstructured.Unstructured))
+		if err != nil {
+			klog.Errorf("Failed to convert ClusterPropagationPolicy from unstructured object: %v", err)
+			return nil, err
+		}
+		policyList = append(policyList, policy)
+	}
+
+	matchedClusterPolicies := make([]*policyv1alpha1.ClusterPropagationPolicy, 0)
+	for _, policy := range policyList {
 		if util.ResourceMatchSelectors(object, policy.Spec.ResourceSelectors...) {
 			matchedClusterPolicies = append(matchedClusterPolicies, policy)
 		}
@@ -387,10 +407,11 @@ func (d *ResourceDetector) LookForMatchedClusterPolicy(object *unstructured.Unst
 	})
 
 	if len(matchedClusterPolicies) == 0 {
+		klog.V(2).Infof("no propagationpolicy match for resource(%s)", objectKey)
 		return nil, nil
 	}
 	klog.V(2).Infof("Matched cluster policy(%s) for resource(%s)", matchedClusterPolicies[0].Name, objectKey)
-	return &matchedClusterPolicies[0], nil
+	return matchedClusterPolicies[0], nil
 }
 
 // ApplyPolicy starts propagate the object referenced by object key according to PropagationPolicy.
@@ -418,6 +439,8 @@ func (d *ResourceDetector) ApplyPolicy(object *unstructured.Unstructured, object
 		bindingCopy.Labels = binding.Labels
 		bindingCopy.OwnerReferences = binding.OwnerReferences
 		bindingCopy.Spec.Resource = binding.Spec.Resource
+		bindingCopy.Spec.ReplicaRequirements = binding.Spec.ReplicaRequirements
+		bindingCopy.Spec.Replicas = binding.Spec.Replicas
 		return nil
 	})
 	if err != nil {
@@ -464,6 +487,8 @@ func (d *ResourceDetector) ApplyClusterPolicy(object *unstructured.Unstructured,
 			bindingCopy.Labels = binding.Labels
 			bindingCopy.OwnerReferences = binding.OwnerReferences
 			bindingCopy.Spec.Resource = binding.Spec.Resource
+			bindingCopy.Spec.ReplicaRequirements = binding.Spec.ReplicaRequirements
+			bindingCopy.Spec.Replicas = binding.Spec.Replicas
 			return nil
 		})
 
@@ -491,6 +516,8 @@ func (d *ResourceDetector) ApplyClusterPolicy(object *unstructured.Unstructured,
 			bindingCopy.Labels = binding.Labels
 			bindingCopy.OwnerReferences = binding.OwnerReferences
 			bindingCopy.Spec.Resource = binding.Spec.Resource
+			bindingCopy.Spec.ReplicaRequirements = binding.Spec.ReplicaRequirements
+			bindingCopy.Spec.Replicas = binding.Spec.Replicas
 			return nil
 		})
 
@@ -587,7 +614,7 @@ func (d *ResourceDetector) ClaimClusterPolicyForObject(object *unstructured.Unst
 // BuildResourceBinding builds a desired ResourceBinding for object.
 func (d *ResourceDetector) BuildResourceBinding(object *unstructured.Unstructured, objectKey keys.ClusterWideKey, labels map[string]string) (*workv1alpha1.ResourceBinding, error) {
 	bindingName := names.GenerateBindingName(object.GetKind(), object.GetName())
-	replicaResourceRequirements, replicas, err := d.GetReplicaDeclaration(object)
+	replicaRequirements, replicas, err := d.GetReplicaDeclaration(object)
 	if err != nil {
 		return nil, err
 	}
@@ -608,8 +635,8 @@ func (d *ResourceDetector) BuildResourceBinding(object *unstructured.Unstructure
 				Name:            object.GetName(),
 				ResourceVersion: object.GetResourceVersion(),
 			},
-			ReplicaResourceRequirements: replicaResourceRequirements,
-			Replicas:                    replicas,
+			ReplicaRequirements: replicaRequirements,
+			Replicas:            replicas,
 		},
 	}
 
@@ -619,7 +646,7 @@ func (d *ResourceDetector) BuildResourceBinding(object *unstructured.Unstructure
 // BuildClusterResourceBinding builds a desired ClusterResourceBinding for object.
 func (d *ResourceDetector) BuildClusterResourceBinding(object *unstructured.Unstructured, objectKey keys.ClusterWideKey, labels map[string]string) (*workv1alpha1.ClusterResourceBinding, error) {
 	bindingName := names.GenerateBindingName(object.GetKind(), object.GetName())
-	replicaResourceRequirements, replicas, err := d.GetReplicaDeclaration(object)
+	replicaRequirements, replicas, err := d.GetReplicaDeclaration(object)
 	if err != nil {
 		return nil, err
 	}
@@ -638,8 +665,8 @@ func (d *ResourceDetector) BuildClusterResourceBinding(object *unstructured.Unst
 				Name:            object.GetName(),
 				ResourceVersion: object.GetResourceVersion(),
 			},
-			ReplicaResourceRequirements: replicaResourceRequirements,
-			Replicas:                    replicas,
+			ReplicaRequirements: replicaRequirements,
+			Replicas:            replicas,
 		},
 	}
 
@@ -647,7 +674,7 @@ func (d *ResourceDetector) BuildClusterResourceBinding(object *unstructured.Unst
 }
 
 // GetReplicaDeclaration get the replicas and resource requirements of a Deployment object
-func (d *ResourceDetector) GetReplicaDeclaration(object *unstructured.Unstructured) (corev1.ResourceList, int32, error) {
+func (d *ResourceDetector) GetReplicaDeclaration(object *unstructured.Unstructured) (*workv1alpha1.ReplicaRequirements, int32, error) {
 	if object.GetKind() == util.DeploymentKind {
 		replicas, ok, err := unstructured.NestedInt64(object.Object, util.SpecField, util.ReplicasField)
 		if !ok || err != nil {
@@ -657,24 +684,27 @@ func (d *ResourceDetector) GetReplicaDeclaration(object *unstructured.Unstructur
 		if !ok || err != nil {
 			return nil, 0, err
 		}
-		replicaResourceRequirements, err := d.getReplicaResourceRequirements(podTemplate)
+		replicaRequirements, err := d.getReplicaRequirements(podTemplate)
 		if err != nil {
 			return nil, 0, err
 		}
-		return replicaResourceRequirements, int32(replicas), nil
+		return replicaRequirements, int32(replicas), nil
 	}
 	return nil, 0, nil
 }
 
-func (d *ResourceDetector) getReplicaResourceRequirements(object map[string]interface{}) (corev1.ResourceList, error) {
+func (d *ResourceDetector) getReplicaRequirements(object map[string]interface{}) (*workv1alpha1.ReplicaRequirements, error) {
 	var podTemplateSpec *corev1.PodTemplateSpec
 	err := runtime.DefaultUnstructuredConverter.FromUnstructured(object, &podTemplateSpec)
 	if err != nil {
 		return nil, err
 	}
 	res := util.EmptyResource().AddPodRequest(&podTemplateSpec.Spec)
-	replicaResourceRequirements := res.ResourceList()
-	return replicaResourceRequirements, nil
+	replicaRequirements := &workv1alpha1.ReplicaRequirements{
+		NodeClaim:       helper.GenerateNodeClaimByPodSpec(&podTemplateSpec.Spec),
+		ResourceRequest: res.ResourceList(),
+	}
+	return replicaRequirements, nil
 }
 
 // AddWaiting adds object's key to waiting list.
@@ -857,7 +887,7 @@ func (d *ResourceDetector) HandlePropagationPolicyDeletion(policyNS string, poli
 	for _, binding := range rbs.Items {
 		// Cleanup the labels from the object referencing by binding.
 		// In addition, this will give the object a chance to match another policy.
-		if err := d.CleanupLabels(binding.Spec.Resource, policyv1alpha1.PropagationPolicyNameLabel, policyv1alpha1.PropagationPolicyNameLabel); err != nil {
+		if err := d.CleanupLabels(binding.Spec.Resource, policyv1alpha1.PropagationPolicyNamespaceLabel, policyv1alpha1.PropagationPolicyNameLabel); err != nil {
 			klog.Errorf("Failed to cleanup label from resource(%s-%s/%s) when resource binding(%s/%s) removing, error: %v",
 				binding.Spec.Resource.Kind, binding.Spec.Resource.Namespace, binding.Spec.Resource.Name, binding.Namespace, binding.Name, err)
 			return err
@@ -980,28 +1010,6 @@ func (d *ResourceDetector) OnResourceBindingUpdate(_, newObj interface{}) {
 	d.OnResourceBindingAdd(newObj)
 }
 
-// OnClusterResourceBindingDelete handles object delete event.
-func (d *ResourceDetector) OnClusterResourceBindingDelete(obj interface{}) {
-	unstructuredObj, ok := obj.(*unstructured.Unstructured)
-	if !ok {
-		klog.Errorf("Invalid object type: %v", reflect.TypeOf(obj))
-		return
-	}
-
-	binding := &workv1alpha1.ClusterResourceBinding{}
-	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(unstructuredObj.UnstructuredContent(), binding); err != nil {
-		klog.Errorf("Failed to convert unstructured to typed object: %v", err)
-		return
-	}
-
-	objRef := binding.Spec.Resource
-	err := d.CleanupResourceTemplateStatus(binding.Spec.Resource)
-	if err != nil {
-		// Just log when error happened as there is no queue for delete event.
-		klog.Warningf("Failed to cleanup resource(kind=%s, %s/%s) status: %v", objRef.Kind, objRef.Namespace, objRef.Name, err)
-	}
-}
-
 // ReconcileResourceBinding handles ResourceBinding object changes.
 // For each ResourceBinding changes, we will try to calculate the summary status and update to original object
 // that the ResourceBinding refer to.
@@ -1052,40 +1060,6 @@ func (d *ResourceDetector) OnClusterResourceBindingAdd(obj interface{}) {
 // OnClusterResourceBindingUpdate handles object update event and push the object to queue.
 func (d *ResourceDetector) OnClusterResourceBindingUpdate(oldObj, newObj interface{}) {
 	d.OnClusterResourceBindingAdd(newObj)
-}
-
-// OnResourceBindingDelete handles object delete event.
-func (d *ResourceDetector) OnResourceBindingDelete(obj interface{}) {
-	unstructuredObj, ok := obj.(*unstructured.Unstructured)
-	if !ok {
-		klog.Errorf("Invalid object type: %v", reflect.TypeOf(obj))
-		return
-	}
-
-	binding := &workv1alpha1.ResourceBinding{}
-	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(unstructuredObj.UnstructuredContent(), binding); err != nil {
-		klog.Errorf("Failed to convert unstructured to typed object: %v", err)
-		return
-	}
-
-	objRef := binding.Spec.Resource
-	err := d.CleanupResourceTemplateStatus(binding.Spec.Resource)
-	if err != nil {
-		// Just log when error happened as there is no queue for delete event.
-		klog.Warningf("Failed to cleanup resource(kind=%s, %s/%s) status: %v", objRef.Kind, objRef.Namespace, objRef.Name, err)
-	}
-}
-
-// CleanupResourceTemplateStatus cleanup the status from resource template.
-// Note: Only limited resource type supported.
-func (d *ResourceDetector) CleanupResourceTemplateStatus(objRef workv1alpha1.ObjectReference) error {
-	switch objRef.Kind {
-	case util.DeploymentKind, util.ServiceKind, util.IngressKind, util.JobKind:
-		return d.CleanupResourceStatus(objRef)
-	}
-
-	// Unsupported resource type.
-	return nil
 }
 
 // CleanupLabels removes labels from object referencing by objRef.

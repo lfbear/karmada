@@ -30,10 +30,10 @@ import (
 )
 
 var (
-	joinLong = `Join registers a cluster to control plane.`
-
+	joinShort   = `Register a cluster to control plane`
+	joinLong    = `Join registers a cluster to control plane.`
 	joinExample = `
-karmadactl join CLUSTER_NAME --cluster-kubeconfig=<KUBECONFIG>
+%s join CLUSTER_NAME --cluster-kubeconfig=<KUBECONFIG>
 `
 )
 
@@ -57,22 +57,15 @@ var (
 
 var clusterResourceKind = clusterv1alpha1.SchemeGroupVersion.WithKind("Cluster")
 
-const (
-	// TODO(RainbowMango) token and caData key both used by command and controller.
-	// It's better to put them to a common place, such as API definition.
-	tokenKey  = "token"
-	caDataKey = "caBundle"
-)
-
 // NewCmdJoin defines the `join` command that registers a cluster.
-func NewCmdJoin(cmdOut io.Writer, karmadaConfig KarmadaConfig) *cobra.Command {
+func NewCmdJoin(cmdOut io.Writer, karmadaConfig KarmadaConfig, cmdStr string) *cobra.Command {
 	opts := CommandJoinOption{}
 
 	cmd := &cobra.Command{
 		Use:     "join CLUSTER_NAME --cluster-kubeconfig=<KUBECONFIG>",
-		Short:   "Register a cluster to control plane",
+		Short:   joinShort,
 		Long:    joinLong,
-		Example: joinExample,
+		Example: fmt.Sprintf(joinExample, cmdStr),
 		Run: func(cmd *cobra.Command, args []string) {
 			// Set default values
 			err := opts.Complete(args)
@@ -201,8 +194,8 @@ func JoinCluster(controlPlaneRestConfig, clusterConfig *rest.Config, clusterName
 			Name:      clusterName,
 		},
 		Data: map[string][]byte{
-			caDataKey: clusterSecret.Data["ca.crt"], // TODO(RainbowMango): change ca bundle key to 'ca.crt'.
-			tokenKey:  clusterSecret.Data[tokenKey],
+			clusterv1alpha1.SecretCADataKey: clusterSecret.Data["ca.crt"],
+			clusterv1alpha1.SecretTokenKey:  clusterSecret.Data[clusterv1alpha1.SecretTokenKey],
 		},
 	}
 	secret, err = util.CreateSecret(controlPlaneKubeClient, secret)

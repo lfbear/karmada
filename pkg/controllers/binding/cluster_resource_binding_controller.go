@@ -4,7 +4,7 @@ import (
 	"context"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -45,7 +45,7 @@ func (c *ClusterResourceBindingController) Reconcile(ctx context.Context, req co
 	clusterResourceBinding := &workv1alpha1.ClusterResourceBinding{}
 	if err := c.Client.Get(context.TODO(), req.NamespacedName, clusterResourceBinding); err != nil {
 		// The resource no longer exist, clean up derived Work objects.
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			return helper.DeleteWorks(c.Client, labels.Set{
 				workv1alpha1.ClusterResourceBindingLabel: req.Name,
 			})
@@ -88,7 +88,7 @@ func (c *ClusterResourceBindingController) syncBinding(binding *workv1alpha1.Clu
 		return controllerruntime.Result{Requeue: true}, err
 	}
 
-	err = helper.EnsureWork(c.Client, workload, c.OverrideManager, binding, apiextensionsv1.ClusterScoped)
+	err = ensureWork(c.Client, workload, c.OverrideManager, binding, apiextensionsv1.ClusterScoped)
 	if err != nil {
 		klog.Errorf("Failed to transform clusterResourceBinding(%s) to works. Error: %v.", binding.GetName(), err)
 		return controllerruntime.Result{Requeue: true}, err
@@ -99,6 +99,7 @@ func (c *ClusterResourceBindingController) syncBinding(binding *workv1alpha1.Clu
 		klog.Errorf("Failed to aggregate workStatuses to clusterResourceBinding(%s). Error: %v.", binding.GetName(), err)
 		return controllerruntime.Result{Requeue: true}, err
 	}
+	klog.V(4).Infof("Update clusterResourceBinding(%s) with AggregatedStatus successfully.", binding.Name)
 
 	return controllerruntime.Result{}, nil
 }

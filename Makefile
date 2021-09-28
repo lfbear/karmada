@@ -1,4 +1,5 @@
 GOOS ?= $(shell go env GOOS)
+GOARCH ?= $(shell go env GOARCH)
 SOURCES := $(shell find . -type f  -name '*.go')
 
 # Git information
@@ -38,7 +39,7 @@ ifeq ($(VERSION), "")
     endif
 endif
 
-all: karmada-controller-manager karmada-scheduler karmadactl karmada-webhook karmada-agent
+all: karmada-controller-manager karmada-scheduler karmadactl kubectl-karmada karmada-webhook karmada-agent karmada-scheduler-estimator
 
 karmada-controller-manager: $(SOURCES)
 	CGO_ENABLED=0 GOOS=$(GOOS) go build \
@@ -58,6 +59,12 @@ karmadactl: $(SOURCES)
 		-o karmadactl \
 		cmd/karmadactl/karmadactl.go
 
+kubectl-karmada: $(SOURCES)
+	CGO_ENABLED=0 GOOS=$(GOOS) go build \
+		-ldflags $(LDFLAGS) \
+		-o kubectl-karmada \
+		cmd/kubectl-karmada/kubectl-karmada.go
+
 karmada-webhook: $(SOURCES)
 	CGO_ENABLED=0 GOOS=$(GOOS) go build \
 		-ldflags $(LDFLAGS) \
@@ -70,8 +77,14 @@ karmada-agent: $(SOURCES)
 		-o karmada-agent \
 		cmd/agent/main.go
 
+karmada-scheduler-estimator: $(SOURCES)
+	CGO_ENABLED=0 GOOS=$(GOOS) go build \
+		-ldflags $(LDFLAGS) \
+		-o karmada-scheduler-estimator \
+		cmd/scheduler-estimator/main.go
+
 clean:
-	rm -rf karmada-controller-manager karmada-scheduler karmadactl karmada-webhook karmada-agent
+	rm -rf karmada-controller-manager karmada-scheduler karmadactl kubectl-karmada karmada-webhook karmada-agent karmada-scheduler-estimator
 
 .PHONY: update
 update:
@@ -85,7 +98,7 @@ verify:
 test:
 	go test --race --v ./pkg/...
 
-images: image-karmada-controller-manager image-karmada-scheduler image-karmada-webhook image-karmada-agent
+images: image-karmada-controller-manager image-karmada-scheduler image-karmada-webhook image-karmada-agent image-karmada-scheduler-estimator
 
 image-karmada-controller-manager: karmada-controller-manager
 	VERSION=$(VERSION) hack/docker.sh karmada-controller-manager
@@ -99,6 +112,9 @@ image-karmada-webhook: karmada-webhook
 image-karmada-agent: karmada-agent
 	VERSION=$(VERSION) hack/docker.sh karmada-agent
 
+image-karmada-scheduler-estimator: karmada-scheduler-estimator
+	VERSION=$(VERSION) hack/docker.sh karmada-scheduler-estimator
+
 upload-images: images
 	@echo "push images to $(REGISTRY)"
 ifneq ($(REGISTRY_USER_NAME), "")
@@ -108,3 +124,4 @@ endif
 	docker push ${REGISTRY}/karmada-scheduler:${VERSION}
 	docker push ${REGISTRY}/karmada-webhook:${VERSION}
 	docker push ${REGISTRY}/karmada-agent:${VERSION}
+	docker push ${REGISTRY}/karmada-scheduler-estimator:${VERSION}

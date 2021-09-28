@@ -10,7 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1beta1 "k8s.io/api/discovery/v1beta1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/rand"
@@ -353,7 +353,7 @@ var _ = ginkgo.Describe("[MCS] Multi-Cluster Service testing", func() {
 				err := wait.PollImmediate(pollInterval, pollTimeout, func() (done bool, err error) {
 					_, err = importClusterClient.CoreV1().Services(demoService.Namespace).Get(context.TODO(), names.GenerateDerivedServiceName(demoService.Name), metav1.GetOptions{})
 					if err != nil {
-						if errors.IsNotFound(err) {
+						if apierrors.IsNotFound(err) {
 							return false, nil
 						}
 						return false, err
@@ -530,8 +530,10 @@ var _ = ginkgo.Describe("[MCS] Multi-Cluster Service testing", func() {
 				updateReplicaCount := int32(2)
 				demoDeployment.Spec.Replicas = &updateReplicaCount
 
-				_, err := exportClusterClient.AppsV1().Deployments(demoDeployment.Namespace).Update(context.TODO(), &demoDeployment, metav1.UpdateOptions{})
-				gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+				gomega.Eventually(func() error {
+					_, err := exportClusterClient.AppsV1().Deployments(demoDeployment.Namespace).Update(context.TODO(), &demoDeployment, metav1.UpdateOptions{})
+					return err
+				}, pollTimeout, pollInterval).ShouldNot(gomega.HaveOccurred())
 			})
 
 			ginkgo.By(fmt.Sprintf("Wait EndpointSlice update in %s cluster", serviceImportClusterName), func() {
