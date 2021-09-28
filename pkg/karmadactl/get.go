@@ -30,8 +30,7 @@ import (
 	"k8s.io/kubectl/pkg/cmd/get"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 
-	//"k8s.io/kubectl/pkg/scheme"
-
+	clusterv1alpha1 "github.com/karmada-io/karmada/pkg/apis/cluster/v1alpha1"
 	"github.com/karmada-io/karmada/pkg/karmadactl/options"
 	"github.com/karmada-io/karmada/pkg/util/gclient"
 )
@@ -501,8 +500,8 @@ func (g *CommandGetOptions) getSecretTokenInKarmada(client *rest.Config, name st
 	if err != nil {
 		return err
 	}
-	clusterInfos[name].BearerToken = string(secret.Data[tokenKey])
-	clusterInfos[name].CAData = string(secret.Data[caDataKey])
+	clusterInfos[name].BearerToken = string(secret.Data[clusterv1alpha1.SecretTokenKey])
+	clusterInfos[name].CAData = string(secret.Data[clusterv1alpha1.SecretCADataKey])
 	return nil
 }
 
