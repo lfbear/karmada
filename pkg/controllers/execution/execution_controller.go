@@ -16,13 +16,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	"github.com/karmada-io/karmada/pkg/apis/cluster/v1alpha1"
+	clusterv1alpha1 "github.com/karmada-io/karmada/pkg/apis/cluster/v1alpha1"
 	workv1alpha1 "github.com/karmada-io/karmada/pkg/apis/work/v1alpha1"
 	"github.com/karmada-io/karmada/pkg/util"
 	"github.com/karmada-io/karmada/pkg/util/helper"
+	"github.com/karmada-io/karmada/pkg/util/informermanager"
+	"github.com/karmada-io/karmada/pkg/util/informermanager/keys"
 	"github.com/karmada-io/karmada/pkg/util/names"
 	"github.com/karmada-io/karmada/pkg/util/objectwatcher"
-	"github.com/karmada-io/karmada/pkg/util/restmapper"
 )
 
 const (
@@ -32,12 +33,12 @@ const (
 
 // Controller is to sync Work.
 type Controller struct {
-	client.Client        // used to operate Work resources.
-	EventRecorder        record.EventRecorder
-	RESTMapper           meta.RESTMapper
-	ObjectWatcher        objectwatcher.ObjectWatcher
-	PredicateFunc        predicate.Predicate
-	ClusterClientSetFunc func(c *v1alpha1.Cluster, client client.Client) (*util.DynamicClusterClient, error)
+	client.Client   // used to operate Work resources.
+	EventRecorder   record.EventRecorder
+	RESTMapper      meta.RESTMapper
+	ObjectWatcher   objectwatcher.ObjectWatcher
+	PredicateFunc   predicate.Predicate
+	InformerManager informermanager.MultiClusterInformerManager
 }
 
 // Reconcile performs a full reconciliation for the object referred to by the Request.
@@ -92,7 +93,7 @@ func (c *Controller) SetupWithManager(mgr controllerruntime.Manager) error {
 		Complete(c)
 }
 
-func (c *Controller) syncWork(cluster *v1alpha1.Cluster, work *workv1alpha1.Work) (controllerruntime.Result, error) {
+func (c *Controller) syncWork(cluster *clusterv1alpha1.Cluster, work *workv1alpha1.Work) (controllerruntime.Result, error) {
 	if !util.IsClusterReady(&cluster.Status) {
 		klog.Errorf("Stop sync work(%s/%s) for cluster(%s) as cluster not ready.", work.Namespace, work.Name, cluster.Name)
 		return controllerruntime.Result{Requeue: true}, fmt.Errorf("cluster(%s) not ready", cluster.Name)
@@ -109,7 +110,7 @@ func (c *Controller) syncWork(cluster *v1alpha1.Cluster, work *workv1alpha1.Work
 
 // tryDeleteWorkload tries to delete resource in the given member cluster.
 // Abort deleting when the member cluster is unready, otherwise we can't unjoin the member cluster when the member cluster is unready
-func (c *Controller) tryDeleteWorkload(cluster *v1alpha1.Cluster, work *workv1alpha1.Work) error {
+func (c *Controller) tryDeleteWorkload(cluster *clusterv1alpha1.Cluster, work *workv1alpha1.Work) error {
 	// Do not clean up resource in the given member cluster if the status of the given member cluster is unready
 	if !util.IsClusterReady(&cluster.Status) {
 		klog.Infof("Do not clean up resource in the given member cluster if the status of the given member cluster %s is unready", cluster.Name)
@@ -149,12 +150,7 @@ func (c *Controller) removeFinalizer(work *workv1alpha1.Work) (controllerruntime
 }
 
 // syncToClusters ensures that the state of the given object is synchronized to member clusters.
-func (c *Controller) syncToClusters(cluster *v1alpha1.Cluster, work *workv1alpha1.Work) error {
-	clusterDynamicClient, err := c.ClusterClientSetFunc(cluster, c.Client)
-	if err != nil {
-		return err
-	}
-
+func (c *Controller) syncToClusters(cluster *clusterv1alpha1.Cluster, work *workv1alpha1.Work) error {
 	var errs []error
 	syncSucceedNum := 0
 	for _, manifest := range work.Spec.Workload.Manifests {
@@ -168,7 +164,7 @@ func (c *Controller) syncToClusters(cluster *v1alpha1.Cluster, work *workv1alpha
 
 		applied := helper.IsResourceApplied(&work.Status)
 		if applied {
-			err = c.tryUpdateWorkload(cluster, workload, clusterDynamicClient)
+			err = c.tryUpdateWorkload(cluster, workload)
 			if err != nil {
 				klog.Errorf("Failed to update resource(%v/%v) in the given member cluster %s, err is %v", workload.GetNamespace(), workload.GetName(), cluster.Name, err)
 				errs = append(errs, err)
@@ -188,7 +184,7 @@ func (c *Controller) syncToClusters(cluster *v1alpha1.Cluster, work *workv1alpha
 	if len(errs) > 0 {
 		total := len(work.Spec.Workload.Manifests)
 		message := fmt.Sprintf("Failed to apply all manifests (%v/%v): %v", syncSucceedNum, total, errors.NewAggregate(errs).Error())
-		err = c.updateAppliedCondition(work, metav1.ConditionFalse, "AppliedFailed", message)
+		err := c.updateAppliedCondition(work, metav1.ConditionFalse, "AppliedFailed", message)
 		if err != nil {
 			klog.Errorf("Failed to update applied status for given work %v, namespace is %v, err is %v", work.Name, work.Namespace, err)
 			errs = append(errs, err)
@@ -196,7 +192,7 @@ func (c *Controller) syncToClusters(cluster *v1alpha1.Cluster, work *workv1alpha
 		return errors.NewAggregate(errs)
 	}
 
-	err = c.updateAppliedCondition(work, metav1.ConditionTrue, "AppliedSuccessful", "Manifest has been successfully applied")
+	err := c.updateAppliedCondition(work, metav1.ConditionTrue, "AppliedSuccessful", "Manifest has been successfully applied")
 	if err != nil {
 		klog.Errorf("Failed to update applied status for given work %v, namespace is %v, err is %v", work.Name, work.Namespace, err)
 		return err
@@ -205,15 +201,14 @@ func (c *Controller) syncToClusters(cluster *v1alpha1.Cluster, work *workv1alpha
 	return nil
 }
 
-func (c *Controller) tryUpdateWorkload(cluster *v1alpha1.Cluster, workload *unstructured.Unstructured, clusterDynamicClient *util.DynamicClusterClient) error {
-	// todo: get clusterObj from cache
-	dynamicResource, err := restmapper.GetGroupVersionResource(c.RESTMapper, workload.GroupVersionKind())
+func (c *Controller) tryUpdateWorkload(cluster *clusterv1alpha1.Cluster, workload *unstructured.Unstructured) error {
+	fedKey, err := keys.FederatedKeyFunc(cluster.Name, workload)
 	if err != nil {
-		klog.Errorf("Failed to get resource(%s/%s) as mapping GVK to GVR failed: %v", workload.GetNamespace(), workload.GetName(), err)
+		klog.Errorf("Failed to get FederatedKey %s, error: %v", workload.GetName(), err)
 		return err
 	}
 
-	clusterObj, err := clusterDynamicClient.DynamicClientSet.Resource(dynamicResource).Namespace(workload.GetNamespace()).Get(context.TODO(), workload.GetName(), metav1.GetOptions{})
+	clusterObj, err := helper.GetObjectFromCache(c.RESTMapper, c.InformerManager, fedKey)
 	if err != nil {
 		if !apierrors.IsNotFound(err) {
 			klog.Errorf("Failed to get resource %v from member cluster, err is %v ", workload.GetName(), err)
@@ -230,7 +225,7 @@ func (c *Controller) tryUpdateWorkload(cluster *v1alpha1.Cluster, workload *unst
 	return nil
 }
 
-func (c *Controller) tryCreateWorkload(cluster *v1alpha1.Cluster, workload *unstructured.Unstructured) error {
+func (c *Controller) tryCreateWorkload(cluster *clusterv1alpha1.Cluster, workload *unstructured.Unstructured) error {
 	err := c.ObjectWatcher.Create(cluster, workload)
 	if err != nil {
 		klog.Errorf("Failed to create resource in the given member cluster %s, err is %v", cluster.Name, err)

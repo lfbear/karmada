@@ -10,6 +10,7 @@
 
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out
+!cover.out
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
@@ -18,8 +19,10 @@
 .vscode/
 
 # karamada binary
-karmada-agent
-karmada-controller-manager
-karmada-scheduler
-karmada-webhook
-karmadactl
+/karmada-agent
+/karmada-controller-manager
+/karmada-scheduler
+/karmada-webhook
+/karmadactl
+/kubectl-karmada
+/karmada-scheduler-estimator

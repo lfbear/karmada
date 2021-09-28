@@ -36,6 +36,8 @@ import (
 	"github.com/karmada-io/karmada/pkg/util/informermanager"
 	"github.com/karmada-io/karmada/pkg/util/objectwatcher"
 	"github.com/karmada-io/karmada/pkg/util/overridemanager"
+	"github.com/karmada-io/karmada/pkg/version"
+	"github.com/karmada-io/karmada/pkg/version/sharedcommand"
 )
 
 // NewControllerManagerCommand creates a *cobra.Command object with default parameters
@@ -43,8 +45,8 @@ func NewControllerManagerCommand(ctx context.Context) *cobra.Command {
 	opts := options.NewOptions()
 
 	cmd := &cobra.Command{
-		Use:  "controller-manager",
-		Long: `The controller manager runs a bunch of controllers`,
+		Use:  "karmada-controller-manager",
+		Long: `The karmada controller manager runs a bunch of controllers`,
 		Run: func(cmd *cobra.Command, args []string) {
 			if err := Run(ctx, opts); err != nil {
 				fmt.Fprintf(os.Stderr, "%v\n", err)
@@ -54,12 +56,14 @@ func NewControllerManagerCommand(ctx context.Context) *cobra.Command {
 	}
 
 	cmd.Flags().AddGoFlagSet(flag.CommandLine)
+	cmd.AddCommand(sharedcommand.NewCmdVersion(os.Stdout, "karmada-controller-manager"))
 	opts.AddFlags(cmd.Flags())
 	return cmd
 }
 
 // Run runs the controller-manager with options. This should never exit.
 func Run(ctx context.Context, opts *options.Options) error {
+	klog.Infof("karmada-controller-manager version: %s", version.Get())
 	config, err := controllerruntime.GetConfig()
 	if err != nil {
 		panic(err)
@@ -100,9 +104,9 @@ func Run(ctx context.Context, opts *options.Options) error {
 // Note: ignore cyclomatic complexity check(by gocyclo) because it will not effect readability.
 //nolint:gocyclo
 func setupControllers(mgr controllerruntime.Manager, opts *options.Options, stopChan <-chan struct{}) {
-	resetConfig := mgr.GetConfig()
-	dynamicClientSet := dynamic.NewForConfigOrDie(resetConfig)
-	discoverClientSet := discovery.NewDiscoveryClientForConfigOrDie(resetConfig)
+	restConfig := mgr.GetConfig()
+	dynamicClientSet := dynamic.NewForConfigOrDie(restConfig)
+	discoverClientSet := discovery.NewDiscoveryClientForConfigOrDie(restConfig)
 	objectWatcher := objectwatcher.NewObjectWatcher(mgr.GetClient(), mgr.GetRESTMapper(), util.NewClusterDynamicClientSet)
 	overrideManager := overridemanager.New(mgr.GetClient())
 	skippedResourceConfig := util.NewSkippedResourceConfig()
@@ -218,12 +222,12 @@ func setupControllers(mgr controllerruntime.Manager, opts *options.Options, stop
 	}
 
 	executionController := &execution.Controller{
-		Client:               mgr.GetClient(),
-		EventRecorder:        mgr.GetEventRecorderFor(execution.ControllerName),
-		RESTMapper:           mgr.GetRESTMapper(),
-		ObjectWatcher:        objectWatcher,
-		PredicateFunc:        helper.NewExecutionPredicate(mgr),
-		ClusterClientSetFunc: util.NewClusterDynamicClientSet,
+		Client:          mgr.GetClient(),
+		EventRecorder:   mgr.GetEventRecorderFor(execution.ControllerName),
+		RESTMapper:      mgr.GetRESTMapper(),
+		ObjectWatcher:   objectWatcher,
+		PredicateFunc:   helper.NewExecutionPredicate(mgr),
+		InformerManager: informermanager.GetInstance(),
 	}
 	if err := executionController.SetupWithManager(mgr); err != nil {
 		klog.Fatalf("Failed to setup execution controller: %v", err)

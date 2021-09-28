@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"net/url"
 
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	kubeclientset "k8s.io/client-go/kubernetes"
@@ -16,12 +16,7 @@ import (
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/karmada-io/karmada/pkg/apis/cluster/v1alpha1"
-)
-
-const (
-	tokenKey  = "token"
-	cADataKey = "caBundle"
+	clusterv1alpha1 "github.com/karmada-io/karmada/pkg/apis/cluster/v1alpha1"
 )
 
 // ClusterClient stands for a cluster Clientset for the given member cluster
@@ -51,7 +46,7 @@ type ClientOption struct {
 }
 
 // NewClusterClientSet returns a ClusterClient for the given member cluster.
-func NewClusterClientSet(c *v1alpha1.Cluster, client client.Client, clientOption *ClientOption) (*ClusterClient, error) {
+func NewClusterClientSet(c *clusterv1alpha1.Cluster, client client.Client, clientOption *ClientOption) (*ClusterClient, error) {
 	clusterConfig, err := buildClusterConfig(c, client)
 	if err != nil {
 		return nil, err
@@ -70,7 +65,7 @@ func NewClusterClientSet(c *v1alpha1.Cluster, client client.Client, clientOption
 }
 
 // NewClusterClientSetForAgent returns a ClusterClient for the given member cluster which will be used in karmada agent.
-func NewClusterClientSetForAgent(c *v1alpha1.Cluster, client client.Client, clientOption *ClientOption) (*ClusterClient, error) {
+func NewClusterClientSetForAgent(c *clusterv1alpha1.Cluster, client client.Client, clientOption *ClientOption) (*ClusterClient, error) {
 	clusterConfig, err := controllerruntime.GetConfig()
 	if err != nil {
 		return nil, fmt.Errorf("error building kubeconfig of member cluster: %s", err.Error())
@@ -89,7 +84,7 @@ func NewClusterClientSetForAgent(c *v1alpha1.Cluster, client client.Client, clie
 }
 
 // NewClusterDynamicClientSet returns a dynamic client for the given member cluster.
-func NewClusterDynamicClientSet(c *v1alpha1.Cluster, client client.Client) (*DynamicClusterClient, error) {
+func NewClusterDynamicClientSet(c *clusterv1alpha1.Cluster, client client.Client) (*DynamicClusterClient, error) {
 	clusterConfig, err := buildClusterConfig(c, client)
 	if err != nil {
 		return nil, err
@@ -103,7 +98,7 @@ func NewClusterDynamicClientSet(c *v1alpha1.Cluster, client client.Client) (*Dyn
 }
 
 // NewClusterDynamicClientSetForAgent returns a dynamic client for the given member cluster which will be used in karmada agent.
-func NewClusterDynamicClientSetForAgent(c *v1alpha1.Cluster, client client.Client) (*DynamicClusterClient, error) {
+func NewClusterDynamicClientSetForAgent(c *clusterv1alpha1.Cluster, client client.Client) (*DynamicClusterClient, error) {
 	clusterConfig, err := controllerruntime.GetConfig()
 	if err != nil {
 		return nil, fmt.Errorf("error building kubeconfig of member cluster: %s", err.Error())
@@ -116,7 +111,7 @@ func NewClusterDynamicClientSetForAgent(c *v1alpha1.Cluster, client client.Clien
 	return &clusterClientSet, nil
 }
 
-func buildClusterConfig(cluster *v1alpha1.Cluster, client client.Client) (*rest.Config, error) {
+func buildClusterConfig(cluster *clusterv1alpha1.Cluster, client client.Client) (*rest.Config, error) {
 	clusterName := cluster.Name
 	apiEndpoint := cluster.Spec.APIEndpoint
 	if apiEndpoint == "" {
@@ -129,14 +124,14 @@ func buildClusterConfig(cluster *v1alpha1.Cluster, client client.Client) (*rest.
 		return nil, fmt.Errorf("cluster %s does not have a secret name", clusterName)
 	}
 
-	secret := &v1.Secret{}
+	secret := &corev1.Secret{}
 	if err := client.Get(context.TODO(), types.NamespacedName{Namespace: secretNamespace, Name: secretName}, secret); err != nil {
 		return nil, err
 	}
 
-	token, tokenFound := secret.Data[tokenKey]
+	token, tokenFound := secret.Data[clusterv1alpha1.SecretTokenKey]
 	if !tokenFound || len(token) == 0 {
-		return nil, fmt.Errorf("the secret for cluster %s is missing a non-empty value for %q", clusterName, tokenKey)
+		return nil, fmt.Errorf("the secret for cluster %s is missing a non-empty value for %q", clusterName, clusterv1alpha1.SecretTokenKey)
 	}
 
 	clusterConfig, err := clientcmd.BuildConfigFromFlags(apiEndpoint, "")
@@ -149,7 +144,7 @@ func buildClusterConfig(cluster *v1alpha1.Cluster, client client.Client) (*rest.
 	if cluster.Spec.InsecureSkipTLSVerification {
 		clusterConfig.TLSClientConfig.Insecure = true
 	} else {
-		clusterConfig.CAData = secret.Data[cADataKey]
+		clusterConfig.CAData = secret.Data[clusterv1alpha1.SecretCADataKey]
 	}
 
 	if cluster.Spec.ProxyURL != "" {

@@ -26,6 +26,8 @@ import (
 	"github.com/karmada-io/karmada/pkg/util/informermanager"
 	"github.com/karmada-io/karmada/pkg/util/names"
 	"github.com/karmada-io/karmada/pkg/util/objectwatcher"
+	"github.com/karmada-io/karmada/pkg/version"
+	"github.com/karmada-io/karmada/pkg/version/sharedcommand"
 )
 
 // NewAgentCommand creates a *cobra.Command object with default parameters
@@ -45,11 +47,13 @@ func NewAgentCommand(ctx context.Context) *cobra.Command {
 	}
 
 	opts.AddFlags(cmd.Flags())
+	cmd.AddCommand(sharedcommand.NewCmdVersion(os.Stdout, "karmada-agent"))
 	cmd.Flags().AddGoFlagSet(flag.CommandLine)
 	return cmd
 }
 
 func run(ctx context.Context, karmadaConfig karmadactl.KarmadaConfig, opts *options.Options) error {
+	klog.Infof("karmada-agent version: %s", version.Get())
 	controlPlaneRestConfig, err := karmadaConfig.GetRestConfig(opts.KarmadaContext, opts.KarmadaKubeConfig)
 	if err != nil {
 		return fmt.Errorf("error building kubeconfig of karmada control plane: %s", err.Error())
@@ -112,12 +116,12 @@ func setupControllers(mgr controllerruntime.Manager, opts *options.Options, stop
 
 	objectWatcher := objectwatcher.NewObjectWatcher(mgr.GetClient(), mgr.GetRESTMapper(), util.NewClusterDynamicClientSetForAgent)
 	executionController := &execution.Controller{
-		Client:               mgr.GetClient(),
-		EventRecorder:        mgr.GetEventRecorderFor(execution.ControllerName),
-		RESTMapper:           mgr.GetRESTMapper(),
-		ObjectWatcher:        objectWatcher,
-		PredicateFunc:        helper.NewExecutionPredicateOnAgent(),
-		ClusterClientSetFunc: util.NewClusterDynamicClientSetForAgent,
+		Client:          mgr.GetClient(),
+		EventRecorder:   mgr.GetEventRecorderFor(execution.ControllerName),
+		RESTMapper:      mgr.GetRESTMapper(),
+		ObjectWatcher:   objectWatcher,
+		PredicateFunc:   helper.NewExecutionPredicateOnAgent(),
+		InformerManager: informermanager.GetInstance(),
 	}
 	if err := executionController.SetupWithManager(mgr); err != nil {
 		klog.Fatalf("Failed to setup execution controller: %v", err)
